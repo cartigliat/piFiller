@@ -144,7 +144,6 @@ namespace piFiller
             }
         }
 
-        // IMPROVED PROTECTION TOGGLE METHOD
         private async void ToggleProtectionButton_Click(object sender, RoutedEventArgs e)
         {
             ToggleProtectionButton.IsEnabled = false;
@@ -160,7 +159,6 @@ namespace piFiller
 
                 try
                 {
-                    // Step 1: Get WSL IP if needed
                     if (string.IsNullOrEmpty(_wslIpAddress))
                     {
                         await GetWslIpWithRetry();
@@ -180,12 +178,10 @@ namespace piFiller
 
                     WslIpTextBlock.Text = _wslIpAddress;
 
-                    // Step 2: Check if Pi-hole is already installed and accessible
                     bool isPiholeAlreadyWorking = await VerifyPiholeAccessibilityAsync(_wslIpAddress);
 
                     if (!isPiholeAlreadyWorking)
                     {
-                        // Step 3: Run installation if Pi-hole is not working
                         StatusTextBlock.Text = "Installing Pi-hole and Unbound...";
                         await RunEnhancedInstallationProcess();
                     }
@@ -195,7 +191,10 @@ namespace piFiller
                         StatusTextBlock.Text = "Pi-hole already installed and accessible";
                     }
 
-                    // Step 4: Configure Windows DNS with verification
+                    StatusTextBlock.Text = "Creating firewall and port forwarding rules...";
+                    await Task.Run(() => WindowsDNSManager.CreateFirewallRules());
+                    await Task.Run(() => WindowsDNSManager.CreatePortForwardingRules(_wslIpAddress));
+
                     StatusTextBlock.Text = "Configuring Windows DNS...";
                     bool dnsConfigured = await ConfigureDnsWithVerificationAsync();
 
@@ -204,22 +203,22 @@ namespace piFiller
                         throw new Exception("DNS configuration failed - Pi-hole may not be accessible from Windows");
                     }
 
-                    // Step 5: Final verification and success
                     StatusTextBlock.Text = "Verifying complete setup...";
-                    await Task.Delay(3000); // Wait for everything to stabilize
+                    await Task.Delay(3000);
 
-                    // Test if Pi-hole is receiving queries
                     await TestPiholeQueryReceiptAsync();
 
-                    // Success!
                     StatusTextBlock.Text = "Protected (Pi-hole Active)";
                     StatusTextBlock.Foreground = Brushes.Green;
                     ToggleProtectionButton.Content = "Stop Protection";
                     LaunchPiholeWebUIButton.IsEnabled = true;
                     _piholeStatsTimer.Start();
 
-                    // Show appropriate success message
                     await ShowEnhancedSuccessMessageAsync();
+
+                    // As the final step, apply the WSL internet connectivity fix
+                    // to ensure the WSL instance itself can resolve DNS queries.
+                    await RunWslInternetFixScriptAsync();
                 }
                 catch (OperationCanceledException)
                 {
@@ -231,7 +230,6 @@ namespace piFiller
                 {
                     Debug.WriteLine($"Protection setup error: {ex.Message}");
 
-                    // Check if Pi-hole exists despite the error
                     bool piholeExists = await VerifyPiholeAccessibilityAsync(_wslIpAddress);
 
                     if (piholeExists)
@@ -272,12 +270,10 @@ namespace piFiller
                     }
                 }
             }
-            else // User clicked "Stop Protection"
+            else
             {
                 await StopProtection();
                 ToggleProtectionButton.Content = "Start Protection";
-
-                // Clear stats display
                 QueriesTodayTextBlock.Text = "0";
                 QueriesBlockedTextBlock.Text = "0";
                 PercentBlockedTextBlock.Text = "0%";
@@ -285,16 +281,12 @@ namespace piFiller
 
             ToggleProtectionButton.IsEnabled = true;
 
-            // Update stats if protection is active
             if (ToggleProtectionButton.Content.ToString() == "Stop Protection")
             {
                 await UpdatePiholeStatsAsync();
             }
         }
 
-        /// <summary>
-        /// Enhanced method to verify Pi-hole is actually accessible from Windows
-        /// </summary>
         private async Task<bool> VerifyPiholeAccessibilityAsync(string wslIp)
         {
             if (string.IsNullOrEmpty(wslIp)) return false;
@@ -303,7 +295,6 @@ namespace piFiller
             {
                 Debug.WriteLine($"Verifying Pi-hole accessibility at {wslIp}...");
 
-                // Test 1: Check if port 53 is reachable
                 using (var tcpClient = new System.Net.Sockets.TcpClient())
                 {
                     var connectTask = tcpClient.ConnectAsync(wslIp, 53);
@@ -324,12 +315,9 @@ namespace piFiller
 
                 Debug.WriteLine($"Port 53 is accessible on {wslIp}");
 
-                // Test 2: Try actual HTTP connection to Pi-hole
                 using (var client = new System.Net.Http.HttpClient())
                 {
                     client.Timeout = TimeSpan.FromSeconds(10);
-
-                    // Test Pi-hole admin interface
                     try
                     {
                         var response = await client.GetAsync($"http://{wslIp}/admin/");
@@ -344,7 +332,6 @@ namespace piFiller
                         Debug.WriteLine($"Pi-hole web interface test failed: {ex.Message}");
                     }
 
-                    // Test Pi-hole API
                     try
                     {
                         var response = await client.GetAsync($"http://{wslIp}/admin/api.php");
@@ -370,9 +357,6 @@ namespace piFiller
             }
         }
 
-        /// <summary>
-        /// Enhanced DNS configuration with verification and improved error handling
-        /// </summary>
         private async Task<bool> ConfigureDnsWithVerificationAsync()
         {
             if (string.IsNullOrEmpty(_wslIpAddress) || string.IsNullOrEmpty(_primaryNetworkAdapterName))
@@ -385,7 +369,6 @@ namespace piFiller
             {
                 StatusTextBlock.Text = "Verifying Pi-hole accessibility...";
 
-                // First verify Pi-hole is actually accessible
                 bool isPiholeAccessible = await VerifyPiholeAccessibilityAsync(_wslIpAddress);
 
                 if (!isPiholeAccessible)
@@ -404,9 +387,7 @@ namespace piFiller
                     if (result == MessageBoxResult.Yes)
                     {
                         await RunUnboundFixScriptAsync();
-
-                        // Re-verify after fix
-                        await Task.Delay(5000); // Wait for services to restart
+                        await Task.Delay(5000);
                         isPiholeAccessible = await VerifyPiholeAccessibilityAsync(_wslIpAddress);
 
                         if (!isPiholeAccessible)
@@ -430,25 +411,17 @@ namespace piFiller
                 }
 
                 StatusTextBlock.Text = "Configuring Windows DNS...";
-
-                // Configure IPv4 DNS
                 await Task.Run(() => WindowsDNSManager.SetDnsServers(_primaryNetworkAdapterName, new[] { _wslIpAddress }));
                 Debug.WriteLine($"IPv4 DNS set to {_wslIpAddress}");
 
-                // Clear DNS cache
                 await ClearWindowsDNSCache();
-
-                // Wait longer for changes to take effect
                 await Task.Delay(3000);
 
-                // Verify DNS configuration with improved method
                 bool dnsConfigured = await VerifyDnsConfigurationAsync();
 
                 if (!dnsConfigured)
                 {
                     Debug.WriteLine("DNS configuration verification failed");
-
-                    // Try alternative verification
                     bool alternativeCheck = await TestActualDnsResolutionAsync();
                     if (alternativeCheck)
                     {
@@ -476,11 +449,9 @@ namespace piFiller
                         MessageBoxButton.OK,
                         MessageBoxImage.Warning);
 
-                    // Return true anyway since Pi-hole is accessible
                     return true;
                 }
 
-                // Test actual DNS resolution as final check
                 bool dnsWorking = await TestActualDnsResolutionAsync();
 
                 if (!dnsWorking)
@@ -517,32 +488,23 @@ namespace piFiller
                     "DNS Configuration Error",
                     MessageBoxButton.OK,
                     MessageBoxImage.Error);
-
                 return false;
             }
         }
 
-        /// <summary>
-        /// Improved DNS verification that handles Windows DNS configuration properly
-        /// </summary>
         private async Task<bool> VerifyDnsConfigurationAsync()
         {
             try
             {
-                await Task.Delay(2000); // Wait longer for changes to take effect
-
+                await Task.Delay(2000);
                 Debug.WriteLine("Verifying DNS configuration...");
 
-                // Method 1: Use netsh command directly (more reliable)
                 bool netshResult = await VerifyDnsViaNetshAsync();
-
-                // Method 2: Use Windows API as backup
                 bool apiResult = await VerifyDnsViaApiAsync();
 
                 Debug.WriteLine($"Netsh verification: {netshResult}");
                 Debug.WriteLine($"API verification: {apiResult}");
 
-                // Consider it successful if either method confirms the DNS is set
                 bool result = netshResult || apiResult;
 
                 Debug.WriteLine($"Overall DNS verification result: {result}");
@@ -555,9 +517,6 @@ namespace piFiller
             }
         }
 
-        /// <summary>
-        /// Verify DNS configuration using netsh command (more reliable)
-        /// </summary>
         private async Task<bool> VerifyDnsViaNetshAsync()
         {
             try
@@ -575,7 +534,6 @@ namespace piFiller
                 using (Process process = Process.Start(psi))
                 {
                     if (process == null) return false;
-
                     await Task.Run(() => process.WaitForExit(10000));
                     string output = await process.StandardOutput.ReadToEndAsync();
                     string error = await process.StandardError.ReadToEndAsync();
@@ -586,10 +544,7 @@ namespace piFiller
                         Debug.WriteLine($"Netsh DNS error: {error}");
                     }
 
-                    // Check if our WSL IP is in the output
                     bool hasWslIp = output.Contains(_wslIpAddress);
-
-                    // Also check for "Statically Configured" which indicates we set it manually
                     bool isStaticallyConfigured = output.Contains("Statically Configured DNS Servers:");
 
                     Debug.WriteLine($"DNS output contains WSL IP ({_wslIpAddress}): {hasWslIp}");
@@ -605,9 +560,6 @@ namespace piFiller
             }
         }
 
-        /// <summary>
-        /// Verify DNS configuration using Windows API (backup method)
-        /// </summary>
         private async Task<bool> VerifyDnsViaApiAsync()
         {
             try
@@ -629,16 +581,12 @@ namespace piFiller
             }
         }
 
-        /// <summary>
-        /// Test actual DNS resolution (alternative verification)
-        /// </summary>
         private async Task<bool> TestActualDnsResolutionAsync()
         {
             try
             {
                 Debug.WriteLine("Testing actual DNS resolution...");
 
-                // Use nslookup to test DNS resolution through our configured DNS
                 ProcessStartInfo psi = new ProcessStartInfo
                 {
                     FileName = "nslookup",
@@ -652,7 +600,6 @@ namespace piFiller
                 using (Process process = Process.Start(psi))
                 {
                     if (process == null) return false;
-
                     await Task.Run(() => process.WaitForExit(10000));
                     string output = await process.StandardOutput.ReadToEndAsync();
                     string error = await process.StandardError.ReadToEndAsync();
@@ -679,19 +626,14 @@ namespace piFiller
             }
         }
 
-        /// <summary>
-        /// Test if Pi-hole is actually receiving and logging queries
-        /// </summary>
         private async Task TestPiholeQueryReceiptAsync()
         {
             try
             {
                 Debug.WriteLine("Testing if Pi-hole receives queries...");
 
-                // Get current query count
                 string? initialStats = await TryGetPiholeStatsAsync();
                 int initialQueries = 0;
-
                 if (!string.IsNullOrEmpty(initialStats))
                 {
                     string[] stats = initialStats.Split(',');
@@ -700,10 +642,8 @@ namespace piFiller
                         initialQueries = queries;
                     }
                 }
-
                 Debug.WriteLine($"Initial query count: {initialQueries}");
 
-                // Perform a test DNS query that should go through Pi-hole
                 string testDomain = $"test-query-{DateTime.Now.Ticks}.example.org";
 
                 ProcessStartInfo psi = new ProcessStartInfo
@@ -715,7 +655,6 @@ namespace piFiller
                     UseShellExecute = false,
                     CreateNoWindow = true
                 };
-
                 using (Process process = Process.Start(psi))
                 {
                     if (process != null)
@@ -724,13 +663,9 @@ namespace piFiller
                     }
                 }
 
-                // Wait for Pi-hole to log the query
                 await Task.Delay(3000);
-
-                // Check if query count increased
                 string? finalStats = await TryGetPiholeStatsAsync();
                 int finalQueries = 0;
-
                 if (!string.IsNullOrEmpty(finalStats))
                 {
                     string[] stats = finalStats.Split(',');
@@ -739,7 +674,6 @@ namespace piFiller
                         finalQueries = queries;
                     }
                 }
-
                 Debug.WriteLine($"Final query count: {finalQueries}");
 
                 if (finalQueries > initialQueries)
@@ -757,14 +691,9 @@ namespace piFiller
             }
         }
 
-        /// <summary>
-        /// Show enhanced success message with better guidance
-        /// </summary>
         private async Task ShowEnhancedSuccessMessageAsync()
         {
-            // First verify if Pi-hole is actually receiving queries
             await TestPiholeQueryReceiptAsync();
-
             string? currentStats = await TryGetPiholeStatsAsync();
             bool hasQueries = false;
 
@@ -817,21 +746,16 @@ namespace piFiller
             MessageBox.Show(message, "Pi-hole Setup Complete", MessageBoxButton.OK, icon);
         }
 
-        /// <summary>
-        /// Run the Unbound fix script with Quad9 upstream
-        /// </summary>
         private async Task RunUnboundFixScriptAsync()
         {
             try
             {
                 StatusTextBlock.Text = "Running Unbound fix script...";
-
                 string projectRoot = System.IO.Directory.GetParent(AppDomain.CurrentDomain.BaseDirectory)?.Parent?.Parent?.Parent?.FullName;
                 string scriptPath = System.IO.Path.Combine(projectRoot ?? "", "Scripts", "fix_unbound.sh");
 
                 if (!File.Exists(scriptPath))
                 {
-                    // Create the script if it doesn't exist
                     await File.WriteAllTextAsync(scriptPath, GetUnboundFixScriptContent());
                     Debug.WriteLine($"Unbound fix script created at: {scriptPath}");
                 }
@@ -856,12 +780,14 @@ namespace piFiller
                         throw new Exception("Failed to start Unbound fix process");
                     }
 
-                    process.OutputDataReceived += (sender, e) => {
+                    process.OutputDataReceived += (sender, e) =>
+                    {
                         if (e.Data != null)
                         {
                             Debug.WriteLine($"[UNBOUND-FIX] {e.Data}");
 
-                            Dispatcher.Invoke(() => {
+                            Dispatcher.Invoke(() =>
+                            {
                                 var data = e.Data.ToLower();
                                 if (data.Contains("starting unbound"))
                                     StatusTextBlock.Text = "Starting Unbound DNS resolver...";
@@ -876,7 +802,7 @@ namespace piFiller
                     process.BeginOutputReadLine();
                     process.BeginErrorReadLine();
 
-                    bool finished = await Task.Run(() => process.WaitForExit(60000)); // 1 minute timeout
+                    bool finished = await Task.Run(() => process.WaitForExit(60000));
 
                     if (!finished)
                     {
@@ -894,13 +820,74 @@ namespace piFiller
             }
         }
 
-        /// <summary>
-        /// Enhanced installation process with better verification
-        /// </summary>
+        private async Task RunWslInternetFixScriptAsync()
+        {
+            try
+            {
+                StatusTextBlock.Text = "Applying WSL network fix...";
+                string projectRoot = System.IO.Directory.GetParent(AppDomain.CurrentDomain.BaseDirectory)?.Parent?.Parent?.Parent?.FullName;
+                string scriptPath = System.IO.Path.Combine(projectRoot ?? "", "Scripts", "fix_wsl_internet.sh");
+
+                if (!File.Exists(scriptPath))
+                {
+                    await File.WriteAllTextAsync(scriptPath, GetWslInternetFixScriptContent());
+                    Debug.WriteLine($"WSL internet fix script created at: {scriptPath}");
+                }
+
+                string wslScriptPath = ConvertToWslPath(scriptPath);
+
+                ProcessStartInfo psi = new ProcessStartInfo
+                {
+                    FileName = "wsl.exe",
+                    Arguments = $"-d Ubuntu -- bash \"{wslScriptPath}\"",
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true
+                };
+
+                using (Process process = Process.Start(psi))
+                {
+                    if (process == null)
+                    {
+                        throw new Exception("Failed to start WSL internet fix process");
+                    }
+
+                    process.OutputDataReceived += (sender, e) => { if (e.Data != null) Debug.WriteLine($"[WSL-NET-FIX] {e.Data}"); };
+                    process.ErrorDataReceived += (sender, e) => { if (e.Data != null) Debug.WriteLine($"[WSL-NET-FIX-ERR] {e.Data}"); };
+
+                    process.BeginOutputReadLine();
+                    process.BeginErrorReadLine();
+
+                    bool finished = await Task.Run(() => process.WaitForExit(60000));
+
+                    if (!finished)
+                    {
+                        process.Kill();
+                        throw new TimeoutException("WSL internet fix script timed out");
+                    }
+
+                    if (process.ExitCode != 0)
+                    {
+                        Debug.WriteLine($"WSL internet fix script failed with exit code: {process.ExitCode}");
+                        MessageBox.Show("The WSL internet fix script finished with an error. The WSL instance may have trouble connecting to the internet.", "Network Fix Warning", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    }
+                    else
+                    {
+                        Debug.WriteLine("WSL internet fix script completed successfully.");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"WSL internet fix script failed: {ex.Message}");
+                MessageBox.Show($"An error occurred while applying the WSL network fix: {ex.Message}", "Network Fix Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+
         private async Task RunEnhancedInstallationProcess()
         {
             StatusTextBlock.Text = "Installing Pi-hole and Unbound...";
-
             string projectRoot = System.IO.Directory.GetParent(AppDomain.CurrentDomain.BaseDirectory)?.Parent?.Parent?.Parent?.FullName;
             string scriptPath = System.IO.Path.Combine(projectRoot ?? "", "Scripts", "install_pihole_unbound.sh");
 
@@ -910,15 +897,11 @@ namespace piFiller
             }
 
             string wslScriptPath = ConvertToWslPath(scriptPath);
-
-            // Run installation
             string installOutput = await ExecuteInstallationDirectly(wslScriptPath);
 
-            // Enhanced verification after installation
             StatusTextBlock.Text = "Verifying installation...";
-            await Task.Delay(5000); // Wait for services to start
+            await Task.Delay(5000);
 
-            // Check if Pi-hole is accessible
             bool isPiholeAccessible = await VerifyPiholeAccessibilityAsync(_wslIpAddress);
 
             if (!isPiholeAccessible)
@@ -937,8 +920,6 @@ namespace piFiller
                 {
                     StatusTextBlock.Text = "Running Unbound fix...";
                     await RunUnboundFixScriptAsync();
-
-                    // Re-verify
                     await Task.Delay(5000);
                     isPiholeAccessible = await VerifyPiholeAccessibilityAsync(_wslIpAddress);
                 }
@@ -955,12 +936,8 @@ namespace piFiller
             }
         }
 
-        /// <summary>
-        /// Get the content for the Unbound fix script with Quad9 upstream
-        /// </summary>
         private string GetUnboundFixScriptContent()
         {
-            // Return the Unbound fix script with Quad9 upstream
             return @"#!/bin/bash
 
 # Quick Unbound Fix Script with Quad9 Upstream
@@ -979,7 +956,6 @@ echo '🔧 Creating Unbound configuration with Quad9 upstream...'
 
 sudo tee /etc/unbound/unbound.conf.d/pi-hole.conf > /dev/null <<'EOF'
 server:
-    # Basic configuration
     verbosity: 1
     interface: 127.0.0.1
     port: 5335
@@ -988,15 +964,11 @@ server:
     do-tcp: yes
     do-ip6: no
     prefer-ip6: no
-    
-    # Security settings
     harden-glue: yes
     harden-dnssec-stripped: yes
     use-caps-for-id: no
     harden-large-queries: yes
     harden-short-bufsize: yes
-    
-    # Performance settings
     edns-buffer-size: 1472
     prefetch: yes
     num-threads: 1
@@ -1004,27 +976,21 @@ server:
     rrset-cache-size: 100m
     cache-min-ttl: 3600
     cache-max-ttl: 86400
-    
-    # Privacy settings
     hide-identity: yes
     hide-version: yes
-    
-    # Access control
     access-control: 127.0.0.0/8 allow
     access-control: 0.0.0.0/0 refuse
 
-# Forward all queries to Quad9 (more reliable than full recursion in WSL)
 forward-zone:
     name: "".""
-    forward-addr: 9.9.9.9        # Quad9 Primary (malware blocking)
-    forward-addr: 149.112.112.112 # Quad9 Secondary
-    forward-addr: 1.1.1.1        # Cloudflare Primary (backup)
-    forward-addr: 1.0.0.1        # Cloudflare Secondary (backup)
+    forward-addr: 9.9.9.9
+    forward-addr: 149.112.112.112
+    forward-addr: 1.1.1.1
+    forward-addr: 1.0.0.1
 EOF
 
 echo '✅ Unbound configuration updated with Quad9 upstream'
 
-# Restart services
 echo ''
 echo '🔄 Restarting services...'
 sudo systemctl stop unbound 2>/dev/null || true
@@ -1052,6 +1018,73 @@ echo '✅ All services restarted with upstream DNS'
 exit 0";
         }
 
+        private string GetWslInternetFixScriptContent()
+        {
+            return @"#!/bin/bash
+#
+# Script to fix WSL internet connectivity by setting a static resolv.conf.
+# This prevents WSL from losing DNS resolution, especially when using Pi-hole.
+
+echo ""🔧 Starting WSL internet connectivity fix...""
+LOG_FILE=""/tmp/wsl_internet_fix.log""
+echo """" > ""$LOG_FILE"" # Clear log file
+
+log() {
+    echo ""$1"" | tee -a ""$LOG_FILE""
+}
+
+# Path to the resolv.conf file
+RESOLV_CONF=""/etc/resolv.conf""
+
+# First, ensure we have sudo access
+sudo -v
+
+# Check if the file is immutable
+if lsattr -l ""$RESOLV_CONF"" 2>/dev/null | grep -q ""Immutable""; then
+    log ""📄 Found immutable flag on $RESOLV_CONF. Removing it first...""
+    sudo chattr -i ""$RESOLV_CONF""
+    if [ $? -ne 0 ]; then
+        log ""❌ ERROR: Failed to remove immutable flag. Please run this script as a user with sudo privileges.""
+        exit 1
+    fi
+fi
+
+log ""📝 Writing new DNS configuration to $RESOLV_CONF...""
+# Using reliable public DNS servers
+sudo bash -c ""cat > $RESOLV_CONF"" <<EOF
+# Generated by PiFiller to ensure WSL connectivity
+nameserver 8.8.8.8
+nameserver 8.8.4.4
+nameserver 1.1.1.1
+options edns0
+EOF
+
+if [ $? -ne 0 ]; then
+    log ""❌ ERROR: Failed to write to $RESOLV_CONF.""
+    exit 1
+fi
+
+log ""🔒 Making $RESOLV_CONF immutable to prevent changes...""
+sudo chattr +i ""$RESOLV_CONF""
+if [ $? -ne 0 ]; then
+    log ""❌ ERROR: Failed to set immutable flag.""
+    exit 1
+fi
+
+log ""✅ Successfully secured $RESOLV_CONF.""
+
+# Test connectivity
+log ""🌐 Testing internet connectivity...""
+if ping -c 2 google.com &> /dev/null; then
+    log ""✅ Internet connectivity confirmed.""
+else
+    log ""⚠️ WARNING: Could not ping google.com. There might still be a network issue.""
+fi
+
+log ""🎉 WSL internet fix applied successfully!""
+exit 0";
+        }
+
         private async Task GetWslIpWithRetry()
         {
             StatusTextBlock.Text = "Getting WSL IP address...";
@@ -1059,8 +1092,7 @@ exit 0";
             try
             {
                 await Task.Run(() => WSLManager.TestWslAccess());
-                _wslIpAddress = await WSLManager.GetWslIpAddressAsync("Ubuntu", maxRetries: 3); // Reduced retries
-
+                _wslIpAddress = await WSLManager.GetWslIpAddressAsync("Ubuntu", maxRetries: 3);
                 if (string.IsNullOrEmpty(_wslIpAddress))
                 {
                     _wslIpAddress = await WSLManager.GetWslIpAlternativeAsync("Ubuntu");
@@ -1075,7 +1107,6 @@ exit 0";
             catch (Exception ex)
             {
                 Debug.WriteLine($"Error getting WSL IP: {ex.Message}");
-                // Don't throw - let the calling method handle the empty IP
             }
         }
 
@@ -1093,7 +1124,7 @@ exit 0";
 
             if (result == MessageBoxResult.Yes)
             {
-                _wslIpAddress = "172.24.2.95"; // Known working IP
+                _wslIpAddress = "172.24.2.95";
                 WslIpTextBlock.Text = _wslIpAddress + " (manual)";
                 Debug.WriteLine($"Using manual WSL IP: {_wslIpAddress}");
             }
@@ -1136,13 +1167,10 @@ exit 0";
             }
         }
 
-        // Helper methods for DNS operations
-
         private async Task RevertIPv6DNS()
         {
             try
             {
-                // Simply ensure IPv6 is back to DHCP/automatic
                 ProcessStartInfo psi = new ProcessStartInfo
                 {
                     FileName = "netsh",
@@ -1234,13 +1262,15 @@ exit 0";
                         throw new Exception("Failed to start installation process");
                     }
 
-                    process.OutputDataReceived += (sender, e) => {
+                    process.OutputDataReceived += (sender, e) =>
+                    {
                         if (e.Data != null)
                         {
                             outputBuilder.AppendLine(e.Data);
                             Debug.WriteLine($"[INSTALL] {e.Data}");
 
-                            Dispatcher.Invoke(() => {
+                            Dispatcher.Invoke(() =>
+                            {
                                 var data = e.Data.ToLower();
                                 if (data.Contains("installing pi-hole"))
                                     StatusTextBlock.Text = "Installing Pi-hole (may take several minutes)...";
@@ -1260,7 +1290,8 @@ exit 0";
                         }
                     };
 
-                    process.ErrorDataReceived += (sender, e) => {
+                    process.ErrorDataReceived += (sender, e) =>
+                    {
                         if (e.Data != null)
                         {
                             errorBuilder.AppendLine(e.Data);
@@ -1484,7 +1515,6 @@ exit 0";
                 using (Process process = Process.Start(psi))
                 {
                     if (process == null) return null;
-
                     await Task.Run(() => process.WaitForExit(10000));
                     string output = await process.StandardOutput.ReadToEndAsync();
                     string error = await process.StandardError.ReadToEndAsync();
@@ -1525,21 +1555,17 @@ exit 0";
                 using (Process process = Process.Start(psi))
                 {
                     if (process == null) return null;
-
                     await Task.Run(() => process.WaitForExit(10000));
                     string output = await process.StandardOutput.ReadToEndAsync();
 
                     Debug.WriteLine($"Alternative WSL stats output: '{output}'");
-
                     if (!string.IsNullOrWhiteSpace(output))
                     {
                         string trimmed = output.Trim();
-
                         if (trimmed.StartsWith("{"))
                         {
                             return ParsePiholeJsonResponse(trimmed);
                         }
-
                         if (trimmed.Contains(","))
                         {
                             return trimmed;
@@ -1599,7 +1625,6 @@ exit 0";
                 {
                     return response;
                 }
-
                 return "Active,0,0,0.0";
             }
             catch (Exception ex)

@@ -119,6 +119,72 @@ namespace PifillCore
         }
 
         /// <summary>
+        /// Creates netsh portproxy rules to forward traffic from the host to the WSL instance.
+        /// </summary>
+        /// <param name="wslIp">The IP address of the WSL instance.</param>
+        public static void CreatePortForwardingRules(string wslIp)
+        {
+            if (string.IsNullOrWhiteSpace(wslIp))
+            {
+                throw new ArgumentException("WSL IP address cannot be empty.", nameof(wslIp));
+            }
+
+            Debug.WriteLine($"Creating port forwarding rules to target WSL IP: {wslIp}");
+
+            // Forward DNS TCP Port 53 for DNS lookups
+            ExecuteNetshCommand($"interface portproxy add v4tov4 listenport=53 listenaddress=0.0.0.0 protocol=tcp connectport=53 connectaddress={wslIp}");
+
+            // Forward Web UI Port 80 for Pi-hole admin dashboard
+            ExecuteNetshCommand($"interface portproxy add v4tov4 listenport=80 listenaddress=0.0.0.0 protocol=tcp connectport=80 connectaddress={wslIp}");
+
+            Debug.WriteLine("Successfully created port forwarding rules for DNS and Web UI.");
+        }
+
+        /// <summary>
+        /// Removes all netsh portproxy rules.
+        /// </summary>
+        public static void RemovePortForwardingRules()
+        {
+            Debug.WriteLine("Resetting all netsh port forwarding rules...");
+            ExecuteNetshCommand("interface portproxy reset");
+            Debug.WriteLine("Port forwarding rules have been reset.");
+        }
+
+        /// <summary>
+        /// Creates Windows Firewall rules to allow inbound traffic to Pi-hole.
+        /// </summary>
+        public static void CreateFirewallRules()
+        {
+            Debug.WriteLine("Creating Windows Firewall rules for Pi-hole...");
+
+            ExecuteNetshCommand("advfirewall firewall add rule name=\"PiHoleDNS-TCP\" dir=in action=allow protocol=TCP localport=53");
+            ExecuteNetshCommand("advfirewall firewall add rule name=\"PiHoleDNS-UDP\" dir=in action=allow protocol=UDP localport=53");
+            ExecuteNetshCommand("advfirewall firewall add rule name=\"PiHoleWeb-TCP\" dir=in action=allow protocol=TCP localport=80");
+
+            Debug.WriteLine("Firewall rules created successfully.");
+        }
+
+        /// <summary>
+        /// Removes the Windows Firewall rules created for Pi-hole.
+        /// </summary>
+        public static void RemoveFirewallRules()
+        {
+            Debug.WriteLine("Removing Windows Firewall rules for Pi-hole...");
+
+            // Use try-catch for each rule in case it doesn't exist, to prevent crashing.
+            try { ExecuteNetshCommand("advfirewall firewall delete rule name=\"PiHoleDNS-TCP\""); }
+            catch (Exception ex) { Debug.WriteLine("Could not remove 'PiHoleDNS-TCP' rule (may not exist). Error: " + ex.Message); }
+
+            try { ExecuteNetshCommand("advfirewall firewall delete rule name=\"PiHoleDNS-UDP\""); }
+            catch (Exception ex) { Debug.WriteLine("Could not remove 'PiHoleDNS-UDP' rule (may not exist). Error: " + ex.Message); }
+
+            try { ExecuteNetshCommand("advfirewall firewall delete rule name=\"PiHoleWeb-TCP\""); }
+            catch (Exception ex) { Debug.WriteLine("Could not remove 'PiHoleWeb-TCP' rule (may not exist). Error: " + ex.Message); }
+
+            Debug.WriteLine("Firewall rules removal process completed.");
+        }
+
+        /// <summary>
         /// Clear Windows DNS cache to force new lookups
         /// </summary>
         public static void ClearDNSCache()
