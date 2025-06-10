@@ -144,6 +144,157 @@ namespace piFiller
             }
         }
 
+        /// <summary>
+        /// Comprehensive DNS chain verification method that tests the entire pipeline
+        /// </summary>
+        /// <returns>String indicating the result: "SUCCESS", "UNBOUND_FAIL", "PIHOLE_FAIL", or "WINDOWS_FAIL"</returns>
+        private async Task<string> VerifyDnsChainAsync()
+        {
+            if (string.IsNullOrEmpty(_wslIpAddress))
+            {
+                Debug.WriteLine("DNS Chain Verification: No WSL IP available");
+                return "PIHOLE_FAIL";
+            }
+
+            try
+            {
+                Debug.WriteLine("Starting comprehensive DNS chain verification...");
+
+                // Test 1: Unbound directly (127.0.0.1:5335)
+                Debug.WriteLine("Test 1: Verifying Unbound DNS resolution...");
+                StatusTextBlock.Text = "Verifying Unbound DNS resolver...";
+
+                string unboundCommand = "dig @127.0.0.1 -p 5335 google.com +time=5 +tries=1";
+                string unboundResult = await WSLManager.ExecuteWslCommandAsync("Ubuntu", unboundCommand);
+
+                Debug.WriteLine($"Unbound test result: {unboundResult}");
+
+                // Modified Unbound Test Logic - Positive check for success
+                if (string.IsNullOrEmpty(unboundResult) || !unboundResult.Contains("status: NOERROR"))
+                {
+                    Debug.WriteLine("Unbound test failed: No successful DNS resolution");
+                    return "UNBOUND_FAIL";
+                }
+
+                Debug.WriteLine("✓ Unbound test passed");
+
+                // Test 2: Pi-hole (WSL IP:53)
+                Debug.WriteLine("Test 2: Verifying Pi-hole DNS resolution...");
+                StatusTextBlock.Text = "Verifying Pi-hole DNS forwarding...";
+
+                string piholeCommand = $"dig @{_wslIpAddress} google.com +time=5 +tries=1";
+                string piholeResult = await WSLManager.ExecuteWslCommandAsync("Ubuntu", piholeCommand);
+
+                Debug.WriteLine($"Pi-hole test result: {piholeResult}");
+
+                // Modified Pi-hole Test Logic - Positive check for success
+                if (string.IsNullOrEmpty(piholeResult) || !piholeResult.Contains("status: NOERROR"))
+                {
+                    Debug.WriteLine("Pi-hole test failed: No successful DNS resolution");
+                    return "PIHOLE_FAIL";
+                }
+
+                Debug.WriteLine("✓ Pi-hole test passed");
+
+                // Test 3: Windows DNS resolution through Pi-hole
+                Debug.WriteLine("Test 3: Verifying Windows DNS resolution...");
+                StatusTextBlock.Text = "Verifying Windows DNS configuration...";
+
+                bool windowsTestPassed = await TestWindowsDnsResolutionAsync();
+
+                if (!windowsTestPassed)
+                {
+                    Debug.WriteLine("Windows DNS test failed");
+                    return "WINDOWS_FAIL";
+                }
+
+                Debug.WriteLine("✓ Windows DNS test passed");
+                Debug.WriteLine("🎉 All DNS chain tests passed successfully!");
+
+                return "SUCCESS";
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"DNS Chain Verification exception: {ex.Message}");
+                return "UNBOUND_FAIL"; // Default to the first stage failure
+            }
+        }
+
+        /// <summary>
+        /// Test Windows DNS resolution using nslookup
+        /// </summary>
+        private async Task<bool> TestWindowsDnsResolutionAsync()
+        {
+            try
+            {
+                ProcessStartInfo psi = new ProcessStartInfo
+                {
+                    FileName = "nslookup",
+                    Arguments = $"google.com {_wslIpAddress}",
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+
+                using (Process process = Process.Start(psi))
+                {
+                    if (process == null) return false;
+
+                    await Task.Run(() => process.WaitForExit(10000));
+                    string output = await process.StandardOutput.ReadToEndAsync();
+                    string error = await process.StandardError.ReadToEndAsync();
+
+                    Debug.WriteLine($"Windows nslookup output: {output}");
+                    if (!string.IsNullOrEmpty(error))
+                    {
+                        Debug.WriteLine($"Windows nslookup error: {error}");
+                    }
+
+                    // Check for successful resolution
+                    bool success = process.ExitCode == 0 &&
+                                  output.Contains("Address") &&
+                                  !output.Contains("can't find") &&
+                                  !output.Contains("server can't find") &&
+                                  !output.Contains("timeout");
+
+                    // Also check if we can extract a valid IP address
+                    if (success)
+                    {
+                        var lines = output.Split('\n');
+                        bool foundValidIp = false;
+                        foreach (var line in lines)
+                        {
+                            if (line.Contains("Address") && !line.Contains(_wslIpAddress))
+                            {
+                                var parts = line.Split();
+                                foreach (var part in parts)
+                                {
+                                    if (System.Net.IPAddress.TryParse(part, out var addr) &&
+                                        !System.Net.IPAddress.IsLoopback(addr))
+                                    {
+                                        foundValidIp = true;
+                                        Debug.WriteLine($"Found valid resolved IP: {part}");
+                                        break;
+                                    }
+                                }
+                                if (foundValidIp) break;
+                            }
+                        }
+                        success = foundValidIp;
+                    }
+
+                    Debug.WriteLine($"Windows DNS resolution test: {(success ? "PASSED" : "FAILED")}");
+                    return success;
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"Windows DNS resolution test failed: {ex.Message}");
+                return false;
+            }
+        }
+
         private async void ToggleProtectionButton_Click(object sender, RoutedEventArgs e)
         {
             ToggleProtectionButton.IsEnabled = false;
@@ -203,18 +354,120 @@ namespace piFiller
                         throw new Exception("DNS configuration failed - Pi-hole may not be accessible from Windows");
                     }
 
-                    StatusTextBlock.Text = "Verifying complete setup...";
-                    await Task.Delay(3000);
+                    await WSLManager.ExecuteWslCommandAsync("Ubuntu",
+                        "sudo /usr/local/bin/start-pihole-services.sh");
 
-                    await TestPiholeQueryReceiptAsync();
+                    // NEW: Comprehensive DNS chain verification
+                    StatusTextBlock.Text = "Verifying complete DNS chain...";
+                    string verificationResult = await VerifyDnsChainAsync();
 
-                    StatusTextBlock.Text = "Protected (Pi-hole Active)";
-                    StatusTextBlock.Foreground = Brushes.Green;
-                    ToggleProtectionButton.Content = "Stop Protection";
-                    LaunchPiholeWebUIButton.IsEnabled = true;
-                    _piholeStatsTimer.Start();
+                    // Handle verification results with specific error messages
+                    switch (verificationResult)
+                    {
+                        case "SUCCESS":
+                            StatusTextBlock.Text = "Protected (Pi-hole Active)";
+                            StatusTextBlock.Foreground = Brushes.Green;
+                            ToggleProtectionButton.Content = "Stop Protection";
+                            LaunchPiholeWebUIButton.IsEnabled = true;
+                            _piholeStatsTimer.Start();
 
-                    await ShowEnhancedSuccessMessageAsync();
+                            await ShowEnhancedSuccessMessageAsync();
+                            break;
+
+                        case "UNBOUND_FAIL":
+                            StatusTextBlock.Text = "DNS Chain Error: Unbound failure";
+                            StatusTextBlock.Foreground = Brushes.Red;
+                            ToggleProtectionButton.Content = "Start Protection";
+
+                            MessageBox.Show(
+                                "❌ DNS Chain Verification Failed: Unbound Service Error\n\n" +
+                                "The Unbound DNS resolver is not responding to queries. This means the core DNS resolution service has failed.\n\n" +
+                                "🔧 Recommended Actions:\n" +
+                                "1. Check Unbound service status in WSL\n" +
+                                "2. Review Unbound configuration files\n" +
+                                "3. Verify Unbound has internet connectivity\n" +
+                                "4. Try restarting the Unbound service\n\n" +
+                                "💡 Technical Details:\n" +
+                                "• Test: dig @127.0.0.1 -p 5335 google.com\n" +
+                                "• Expected: DNS resolution with NOERROR status\n" +
+                                "• Result: Failed to resolve DNS queries\n\n" +
+                                "This is typically caused by Unbound configuration errors or network connectivity issues within WSL.",
+                                "Unbound DNS Resolver Failure",
+                                MessageBoxButton.OK,
+                                MessageBoxImage.Error);
+                            break;
+
+                        case "PIHOLE_FAIL":
+                            StatusTextBlock.Text = "DNS Chain Error: Pi-hole failure";
+                            StatusTextBlock.Foreground = Brushes.Red;
+                            ToggleProtectionButton.Content = "Start Protection";
+
+                            MessageBox.Show(
+                                "❌ DNS Chain Verification Failed: Pi-hole Service Error\n\n" +
+                                "Pi-hole is not correctly forwarding DNS queries to Unbound. The Pi-hole service may be misconfigured or not listening on the correct interface.\n\n" +
+                                "🔧 Recommended Actions:\n" +
+                                "1. Check Pi-hole's upstream DNS settings (should be 127.0.0.1#5335)\n" +
+                                "2. Verify Pi-hole is listening on all interfaces\n" +
+                                "3. Review Pi-hole configuration in the web interface\n" +
+                                "4. Check Pi-hole logs for connection errors\n\n" +
+                                "💡 Technical Details:\n" +
+                                $"• Test: dig @{_wslIpAddress} google.com\n" +
+                                "• Expected: DNS resolution through Pi-hole to Unbound\n" +
+                                "• Result: Pi-hole failed to resolve queries\n\n" +
+                                "This typically indicates Pi-hole configuration issues or interface binding problems.",
+                                "Pi-hole DNS Forwarding Failure",
+                                MessageBoxButton.OK,
+                                MessageBoxImage.Error);
+                            break;
+
+                        case "WINDOWS_FAIL":
+                            StatusTextBlock.Text = "DNS Chain Error: Windows configuration";
+                            StatusTextBlock.Foreground = Brushes.Red;
+                            ToggleProtectionButton.Content = "Start Protection";
+
+                            MessageBox.Show(
+                                "❌ DNS Chain Verification Failed: Windows DNS Configuration Error\n\n" +
+                                "Windows cannot resolve DNS queries through Pi-hole. The DNS services are working in WSL, but Windows cannot communicate with them.\n\n" +
+                                "🔧 Recommended Actions:\n" +
+                                "1. Check Windows Firewall settings for DNS (port 53)\n" +
+                                "2. Disable DNS over HTTPS (DoH) in your browser:\n" +
+                                "   • Chrome: Settings → Privacy → Security → Use secure DNS → OFF\n" +
+                                "   • Firefox: Settings → Network Settings → DNS over HTTPS → OFF\n" +
+                                "   • Edge: Settings → Privacy → Security → Use secure DNS → OFF\n" +
+                                "3. Clear Windows DNS cache (ipconfig /flushdns)\n" +
+                                "4. Restart your browser completely\n" +
+                                "5. Check if other DNS clients can reach Pi-hole\n\n" +
+                                "💡 Technical Details:\n" +
+                                $"• Test: nslookup google.com {_wslIpAddress}\n" +
+                                "• Expected: Successful DNS resolution from Windows\n" +
+                                "• Result: Windows cannot reach Pi-hole DNS service\n\n" +
+                                "This is commonly caused by browser DNS over HTTPS settings or Windows firewall issues.",
+                                "Windows DNS Configuration Failure",
+                                MessageBoxButton.OK,
+                                MessageBoxImage.Error);
+                            break;
+
+                        default:
+                            StatusTextBlock.Text = "DNS Chain Error: Unknown failure";
+                            StatusTextBlock.Foreground = Brushes.Red;
+                            ToggleProtectionButton.Content = "Start Protection";
+
+                            MessageBox.Show(
+                                "❌ DNS Chain Verification Failed: Unknown Error\n\n" +
+                                "An unexpected error occurred during DNS chain verification. Please check the application logs for more details.\n\n" +
+                                "Try stopping and starting protection again, or restart the application.",
+                                "Unknown DNS Verification Error",
+                                MessageBoxButton.OK,
+                                MessageBoxImage.Error);
+                            break;
+                    }
+
+                    // If verification failed, don't run the final scripts
+                    if (verificationResult != "SUCCESS")
+                    {
+                        ToggleProtectionButton.IsEnabled = true;
+                        return;
+                    }
 
                     // As the final step, apply the WSL internet connectivity fix
                     // to ensure the WSL instance itself can resolve DNS queries.
@@ -715,7 +968,8 @@ namespace piFiller
                     "🎉 Pi-hole Setup Complete and Working!\n\n" +
                     "✅ Pi-hole and Unbound installed successfully\n" +
                     "✅ Windows DNS configured correctly\n" +
-                    "✅ Pi-hole is receiving and blocking queries\n\n" +
+                    "✅ Pi-hole is receiving and blocking queries\n" +
+                    "✅ Complete DNS chain verification passed\n\n" +
                     "📊 Your internet traffic is now being filtered!\n\n" +
                     "💡 For best results:\n" +
                     "• Clear your browser cache\n" +
@@ -730,6 +984,7 @@ namespace piFiller
                     "⚠️ Pi-hole Setup Complete - Manual Steps Required\n\n" +
                     "✅ Pi-hole and Unbound installed successfully\n" +
                     "✅ Windows DNS configured\n" +
+                    "✅ DNS chain verification passed\n" +
                     "⚠️ Pi-hole may not be receiving queries yet\n\n" +
                     "🔧 IMPORTANT: Complete these steps:\n\n" +
                     "1. 🌐 DISABLE 'DNS over HTTPS' in your browser:\n" +

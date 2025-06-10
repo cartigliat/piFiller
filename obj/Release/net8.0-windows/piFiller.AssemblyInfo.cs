@@ -14,7 +14,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("piFiller")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Release")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+9cca9bd2334f39a6f38fcb7b9c8f83a0821630b5")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+eb650bc3fce78cf72e0ec49483e40b66196cd13c")]
 [assembly: System.Reflection.AssemblyProductAttribute("piFiller")]
 [assembly: System.Reflection.AssemblyTitleAttribute("piFiller")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
